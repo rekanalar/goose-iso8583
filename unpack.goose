@@ -10,7 +10,7 @@ fn unpack_fail(msg: Message&, code: i64, field: i64) -> i64 {
 }
 
 // Reads one bitmap. Returns the 64 bits, the new position and a fault code.
-fn read_bitmap(input: const u8[:], pos: i64, enc: i64) -> u64, i64, i64 {
+fn read_bitmap(input: const u8[:], pos: i64, enc: i64, page: i64) -> u64, i64, i64 {
     var w: u64 = 0;
     if enc == BITMAP_BINARY {
         if pos + 8 > input.len { return 0, pos, ERR_TRUNCATED; }
@@ -21,7 +21,7 @@ fn read_bitmap(input: const u8[:], pos: i64, enc: i64) -> u64, i64, i64 {
     for i in 0..16 {
         var c = input[pos + i];
         if enc == BITMAP_HEX_EBCDIC {
-            let a = EBCDIC_TO_ASCII[c];
+            let a = EBCDIC_TO_ASCII[page * 256 + c];
             if a == 0 { return 0, pos, ERR_BAD_BYTE; }
             c = a;
         }
@@ -43,13 +43,13 @@ fn read_mti(msg: Message&, d: Dialect&, input: const u8[:]) -> i64, i64 {
     var tmp: u8[>..] = [];
     if d.mti_enc == ENC_BCD {
         if input.len < 2 { return 0, ERR_TRUNCATED; }
-        let f = decode_value(tmp, ENC_BCD, PAD_LEFT, input[0..2], 4);
+        let f = decode_value(tmp, ENC_BCD, PAD_LEFT, 0, input[0..2], 4, d.page);
         if f != OK { return 0, ERR_BAD_MTI; }
         msg.mti.append(tmp);
         return 2, OK;
     }
     if input.len < 4 { return 0, ERR_TRUNCATED; }
-    let f = decode_value(tmp, d.mti_enc, PAD_LEFT, input[0..4], 4);
+    let f = decode_value(tmp, d.mti_enc, PAD_LEFT, 0, input[0..4], 4, d.page);
     if f != OK { return 0, ERR_BAD_MTI; }
     if !mti_ok(tmp) { return 0, ERR_BAD_MTI; }
     msg.mti.append(tmp);
@@ -62,7 +62,7 @@ fn read_field(msg: Message&, d: Dialect&, input: const u8[:], pos: i64, id: i64)
     let spec = d.fields[id];
     var units = spec.max_len;
     if spec.kind != KIND_FIXED {
-        let n, f = get_prefix(input, pos, spec.prefix_enc, spec.kind);
+        let n, f = get_prefix(input, pos, spec.prefix_enc, spec.kind, d.page);
         if f != OK { return pos, f; }
         units = n;
     }
@@ -72,10 +72,17 @@ fn read_field(msg: Message&, d: Dialect&, input: const u8[:], pos: i64, id: i64)
     let start = pos + prefix_width(spec.prefix_enc, spec.kind);
     if start + wire > input.len { return pos, ERR_TRUNCATED; }
     if msg.data.len + vlen > MAX_INPUT { return pos, ERR_FULL; }
-    let off = msg.data.len;
-    let f = decode_value(msg.data, spec.enc, spec.padding, input[start..start + wire], vlen);
+    var scratch: u8[>..] = [];
+    let f = decode_field_value(scratch, spec, input[start..start + wire], vlen, d.page);
     if f != OK { return pos, f; }
-    msg.slots[id] = Slot { present: true, off: off, len: vlen };
+    let off = msg.data.len;
+    msg.live += scratch.len;
+    msg.data.append(scratch);
+    if spec.composite != COMPOSITE_NONE {
+        let g = container_check(d, id, spec.composite, msg.data[off..off + scratch.len], 0, scratch.len, 1);
+        if g != OK { return pos, g; }
+    }
+    msg.slots[id] = Slot { present: true, off: off, len: scratch.len };
     return start + wire, OK;
 }
 
@@ -88,19 +95,19 @@ fn unpack(msg: Message&, d: Dialect&, input: const u8[:]) -> i64 {
     let p0, f0 = read_mti(msg, d, input);
     if f0 != OK { return unpack_fail(msg, f0, 0); }
     var pos = p0;
-    let b1, p1, f1 = read_bitmap(input, pos, d.bitmap_enc);
+    let b1, p1, f1 = read_bitmap(input, pos, d.bitmap_enc, d.page);
     if f1 != OK { return unpack_fail(msg, f1, 0); }
     pos = p1;
     var b2: u64 = 0;
     var b3: u64 = 0;
     if bit_set(b1, 1) {
-        let w2, p2, f2 = read_bitmap(input, pos, d.bitmap_enc);
+        let w2, p2, f2 = read_bitmap(input, pos, d.bitmap_enc, d.page);
         if f2 != OK { return unpack_fail(msg, f2, 0); }
         b2 = w2;
         pos = p2;
         if bit_set(b2, 1) {
             if d.bitmaps < 3 { return unpack_fail(msg, ERR_BAD_BITMAP, 65); }
-            let w3, p3, f3 = read_bitmap(input, pos, d.bitmap_enc);
+            let w3, p3, f3 = read_bitmap(input, pos, d.bitmap_enc, d.page);
             if f3 != OK { return unpack_fail(msg, f3, 0); }
             b3 = w3;
             pos = p3;

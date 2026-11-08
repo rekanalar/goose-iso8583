@@ -2,7 +2,7 @@ namespace iso8583;
 
 import std;
 
-fn write_bitmap(out: u8[>..]&, w: u64, enc: i64) {
+fn write_bitmap(out: u8[>..]&, w: u64, enc: i64, page: i64) {
     if enc == BITMAP_BINARY {
         for i in 0..8 { out.push((w >> ((56 - i * 8) as u64)) as u8); }
         return;
@@ -10,7 +10,7 @@ fn write_bitmap(out: u8[>..]&, w: u64, enc: i64) {
     var text: u8[>..] = [];
     for i in 0..16 { text.push(hex_char(((w >> ((60 - i * 4) as u64)) & 15) as i64)); }
     if enc == BITMAP_HEX_EBCDIC {
-        encode_value(out, ENC_EBCDIC, PAD_LEFT, text);
+        encode_value(out, ENC_EBCDIC, PAD_LEFT, 0, text, page);
     } else {
         out.append(text);
     }
@@ -27,7 +27,6 @@ fn pack(out: u8[>..]&, msg: Message&, d: Dialect&) -> i64 {
     var b1: u64 = 0;
     var b2: u64 = 0;
     var b3: u64 = 0;
-    var total: i64 = 0;
     for id in 2..193 {
         if !msg.slots[id].present { continue; }
         let s = msg.slots[id];
@@ -40,7 +39,6 @@ fn pack(out: u8[>..]&, msg: Message&, d: Dialect&) -> i64 {
             msg.fault_field = id;
             return f;
         }
-        total += s.len;
         if id <= 64 {
             b1 = b1 | ((1 as u64) << ((64 - id) as u64));
         } else if id <= 128 {
@@ -54,23 +52,29 @@ fn pack(out: u8[>..]&, msg: Message&, d: Dialect&) -> i64 {
     if need_b3 { b2 = b2 | ((1 as u64) << 63); }
     if need_b2 { b1 = b1 | ((1 as u64) << 63); }
     // The MTI.
-    encode_value(out, d.mti_enc, PAD_LEFT, msg.mti);
-    write_bitmap(out, b1, d.bitmap_enc);
-    if need_b2 { write_bitmap(out, b2, d.bitmap_enc); }
-    if need_b3 { write_bitmap(out, b3, d.bitmap_enc); }
+    encode_value(out, d.mti_enc, PAD_LEFT, 0, msg.mti, d.page);
+    write_bitmap(out, b1, d.bitmap_enc, d.page);
+    if need_b2 { write_bitmap(out, b2, d.bitmap_enc, d.page); }
+    if need_b3 { write_bitmap(out, b3, d.bitmap_enc, d.page); }
     for id in 2..193 {
         if !msg.slots[id].present { continue; }
         let s = msg.slots[id];
         let spec = d.fields[id];
         let v = msg.data[s.off..s.off + s.len];
         let units = units_of(spec.enc, spec.unit, v.len);
-        let f = put_prefix(out, spec.prefix_enc, spec.kind, units);
+        let f = put_prefix(out, spec.prefix_enc, spec.kind, units, d.page);
         if f != OK {
             out.clear();
             msg.fault_field = id;
             return f;
         }
-        encode_value(out, spec.enc, spec.padding, v);
+        if uses_pad_char(spec) {
+            var padded: u8[>..] = [];
+            pad_text(padded, v, spec.max_len, spec.padding, spec.pad_char as u8);
+            encode_value(out, spec.enc, spec.padding, spec.pad_digit, padded, d.page);
+        } else {
+            encode_value(out, spec.enc, spec.padding, spec.pad_digit, v, d.page);
+        }
         if out.len > MAX_INPUT {
             out.clear();
             msg.fault_field = id;

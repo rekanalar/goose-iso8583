@@ -69,5 +69,48 @@ fn run_codec() -> i64 {
     // A variable field of length zero.
     one_field(d, iso8583::KIND_LLVAR, iso8583::ENC_ASCII, iso8583::ENC_ASCII, iso8583::UNIT_BYTES, 30, iso8583::PAD_LEFT);
     bad += wire_case(d, "", "3030", "zero length");
+
+    // Counts in every encoding at widths 1 to 4.
+    var c: u8[>..] = [];
+    var back: u8[>..] = [];
+    for w in 1..5 {
+        var cap = 10;
+        for k in 1..w { cap *= 10; }
+        c.clear();
+        bad += check(iso8583::put_count(c, iso8583::ENC_ASCII, w, cap - 1, 0) == iso8583::OK, "ascii count fits");
+        bad += check(c.len == w, "ascii count width");
+        let n1, f1 = iso8583::get_count(c, 0, iso8583::ENC_ASCII, w, 0);
+        bad += check(f1 == iso8583::OK && n1 == cap - 1, "ascii count round trip");
+        bad += check(iso8583::put_count(c, iso8583::ENC_ASCII, w, cap, 0) == iso8583::ERR_BAD_LENGTH, "ascii count above cap");
+        c.clear();
+        bad += check(iso8583::put_count(c, iso8583::ENC_BCD, w, 1, 0) == iso8583::OK, "bcd count ok");
+        let n2, f2 = iso8583::get_count(c, 0, iso8583::ENC_BCD, w, 0);
+        bad += check(f2 == iso8583::OK && n2 == 1, "bcd count round trip");
+        c.clear();
+        bad += check(iso8583::put_count(c, iso8583::ENC_BINARY, w, 255, 0) == iso8583::OK, "binary count ok");
+        let n3, f3 = iso8583::get_count(c, 0, iso8583::ENC_BINARY, w, 0);
+        bad += check(f3 == iso8583::OK && n3 == 255, "binary count round trip");
+    }
+    // An EBCDIC count round trips through page 0.
+    c.clear();
+    bad += check(iso8583::put_count(c, iso8583::ENC_EBCDIC, 2, 42, 0) == iso8583::OK, "ebcdic count ok");
+    let n4, f4 = iso8583::get_count(c, 0, iso8583::ENC_EBCDIC, 2, 0);
+    bad += check(f4 == iso8583::OK && n4 == 42, "ebcdic count round trip");
+    // A BCD nibble above 9 is a bad length.
+    c.clear();
+    from_hex(c, "9A");
+    let n5, f5 = iso8583::get_count(c, 0, iso8583::ENC_BCD, 1, 0);
+    bad += check(f5 == iso8583::ERR_BAD_LENGTH, "bcd nibble above 9");
+    // A binary count above the cap of the width.
+    bad += check(iso8583::put_count(c, iso8583::ENC_BINARY, 1, 256, 0) == iso8583::ERR_BAD_LENGTH, "binary count above one byte");
+    // A truncated or short count.
+    let n6, f6 = iso8583::get_count("12", 0, iso8583::ENC_ASCII, 3, 0);
+    bad += check(f6 == iso8583::ERR_TRUNCATED, "count past the end");
+    // A count field with a letter is a bad length.
+    let n7, f7 = iso8583::get_count("1x", 0, iso8583::ENC_ASCII, 2, 0);
+    bad += check(f7 == iso8583::ERR_BAD_LENGTH, "letter in count");
+    // A bad width is a bad argument.
+    bad += check(iso8583::put_count(c, iso8583::ENC_ASCII, 0, 1, 0) == iso8583::ERR_BAD_ARG, "width zero");
+    bad += check(iso8583::put_count(c, iso8583::ENC_ASCII, 5, 1, 0) == iso8583::ERR_BAD_ARG, "width five");
     return bad;
 }

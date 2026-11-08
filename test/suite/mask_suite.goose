@@ -10,8 +10,81 @@ fn count_lines(t: const u8[:]) -> i64 {
     return n;
 }
 
+// The safe defaults: fields 48 and 120 to 127 show no value bytes.
+fn run_mask_defaults() -> i64 {
+    var bad = 0;
+    var d = iso8583::Dialect { .. };
+    iso8583::dialect_default_ascii(d);
+    var m = iso8583::Message { .. };
+    iso8583::message_set_mti(m, "0200");
+    for id in 48..49 {
+        bad += check(iso8583::message_set(m, d, id, "4111111111111111SECRET") == iso8583::OK, "set private");
+    }
+    for id in 120..128 {
+        bad += check(iso8583::message_set(m, d, id, "4111111111111111SECRET") == iso8583::OK, "set national");
+    }
+    var text: u8[>..] = [];
+    iso8583::message_text(text, m, d);
+    bad += check(!has_run(text, "4111111111111111"), "no pan in the private fields");
+    bad += check(!has_run(text, "SECRET"), "no secret in the text");
+    var runs = 0;
+    for i in 0..text.len {
+        if text[i] == '*' { runs += 1; }
+    }
+    bad += check(runs >= 9 * 21, "all private bytes masked");
+    return bad;
+}
+
+// MASK_INHERIT on subfields takes the mode of the nearest container.
+fn run_mask_inherit() -> i64 {
+    var bad = 0;
+    var d = iso8583::Dialect { .. };
+    iso8583::dialect_init(d, iso8583::ENC_ASCII, iso8583::BITMAP_HEX_ASCII, 2);
+    iso8583::dialect_field(d, 55, iso8583::KIND_LLLVAR, iso8583::ENC_BINARY, iso8583::ENC_ASCII, iso8583::UNIT_BYTES, 999, iso8583::PAD_LEFT, iso8583::MASK_NONE);
+    iso8583::dialect_composite(d, iso8583::path1(55), iso8583::COMPOSITE_BER, 0);
+    // A PAN subfield under a MASK_NONE container: the subfield mode wins.
+    iso8583::dialect_sub(d, iso8583::path1(55), 0x9F26, iso8583::KIND_LLVAR, iso8583::ENC_ASCII, iso8583::ENC_ASCII, iso8583::UNIT_BYTES, 19, iso8583::PAD_LEFT, iso8583::MASK_PAN);
+    // An inherit subfield under the MASK_NONE container: shows the value.
+    iso8583::dialect_sub(d, iso8583::path1(55), 0x95, iso8583::KIND_FIXED, iso8583::ENC_ASCII, 0, iso8583::UNIT_BYTES, 2, iso8583::PAD_LEFT, iso8583::MASK_INHERIT);
+    // A nested container with MASK_FULL, holding an inherit subfield.
+    iso8583::dialect_sub(d, iso8583::path1(55), 0xA1, iso8583::KIND_LLVAR, iso8583::ENC_BINARY, iso8583::ENC_ASCII, iso8583::UNIT_BYTES, 99, iso8583::PAD_LEFT, iso8583::MASK_FULL);
+    iso8583::dialect_composite(d, iso8583::path2(55, 0xA1), iso8583::COMPOSITE_BER, 0);
+    iso8583::dialect_sub(d, iso8583::path2(55, 0xA1), 0x5A, iso8583::KIND_LLVAR, iso8583::ENC_ASCII, iso8583::ENC_ASCII, iso8583::UNIT_BYTES, 19, iso8583::PAD_LEFT, iso8583::MASK_INHERIT);
+    var m = iso8583::Message { .. };
+    iso8583::message_set_mti(m, "0100");
+    var payload: u8[>..] = [];
+    // 9F26 10 4111111111111111, 95 02 OK, A1 len 1D: 5A 0E 4111111111111111
+    payload.push(0x9F);
+    payload.push(0x26);
+    payload.push(0x10);
+    payload.append("4111111111111111");
+    payload.push(0x95);
+    payload.push(0x02);
+    payload.append("OK");
+    var inner: u8[>..] = [];
+    inner.push(0x5A);
+    inner.push(0x10);
+    inner.append("4111111111111111");
+    payload.push(0xA1);
+    payload.push(inner.len as u8);
+    payload.append(inner);
+    bad += check(iso8583::message_set(m, d, 55, payload) == iso8583::OK, "set inherit payload");
+    var text: u8[>..] = [];
+    iso8583::message_text(text, m, d);
+    // The PAN subfield shows the first-six last-four form.
+    bad += check(has_run(text, "411111******1111"), "pan subfield shows the masked form");
+    // The inherit subfield under MASK_NONE shows the value.
+    bad += check(has_run(text, "F055.95 [2] OK"), "inherit shows the value under mask none");
+    // The inherit subfield under the MASK_FULL container shows stars.
+    bad += check(has_run(text, "F055.A1.5A [16] ****************"), "inherit takes the nearest container mode");
+    bad += check(!has_run(text, "4111111111111111"), "no full pan anywhere");
+    return bad;
+}
+
 fn run_mask() -> i64 {
     var bad = 0;
+    bad += run_mask_defaults();
+    bad += run_mask_inherit();
     var out: u8[>..] = [];
     iso8583::mask_pan(out, "4111111111111111");
     bad += eq_bytes(out, "411111******1111", "mask 16");
@@ -88,7 +161,7 @@ fn run_mask() -> i64 {
     from_hex(nl, "41420A46303032205B5D");
     var m2 = iso8583::Message { .. };
     iso8583::message_set_mti(m2, "0200");
-    iso8583::message_set(m2, d, 48, nl);
+    iso8583::message_set(m2, d, 62, nl);
     iso8583::message_text(text, m2, d);
     bad += check(count_lines(text) == 2, "control bytes do not add lines");
     bad += check(has_run(text, "AB.F002 []\n"), "control byte shown as a dot");

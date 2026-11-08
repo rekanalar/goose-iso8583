@@ -16,7 +16,9 @@ import ast
 import sys
 
 PAN = {2, 34, 102, 103}
-FULL = {35, 36, 45, 52, 53, 55}
+# Fields 48 and 120 to 127 hold private network data of unknown shape.
+# They stay fully masked in the text form.
+FULL = {35, 36, 45, 48, 52, 53, 55, 120, 121, 122, 123, 124, 125, 126, 127}
 # Width of the ASCII length prefix to the kind constant of the package.
 KIND = {0: 0, 2: 1, 3: 2}
 
